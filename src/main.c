@@ -289,7 +289,7 @@ static inline int mdns_multiquery_send(int sock,
     return -1;
 
   // Ask for a unicast response since it's a one-shot query
-  uint16_t rclass = MDNS_CLASS_IN | MDNS_UNICAST_RESPONSE;
+  uint16_t rclass = MDNS_CLASS_IN;
 
   struct sockaddr_storage addr_storage;
   struct sockaddr *saddr = (struct sockaddr *)&addr_storage;
@@ -342,77 +342,6 @@ static inline int mdns_query_send(int sock, mdns_record_type_t type,
   query.name = name;
   query.length = length;
   return mdns_multiquery_send(sock, &query, 1, buffer, capacity, query_id);
-}
-
-bool join_multicast_group(struct sockaddr_in6 *mcast_addr) {
-  int ret;
-  struct sockaddr_in6 *mcast_addr6 = mcast_addr;
-  struct net_if *iface;
-
-  iface = net_if_get_default();
-  if (!iface) {
-    LOG_ERR("Could not get the default interface\n");
-    return false;
-  }
-
-  // mcast = net_if_ipv6_maddr_add(iface, &mcast_addr6->sin6_addr);
-  ret = net_ipv6_mld_join(iface, &mcast_addr6->sin6_addr);
-  if (ret) {
-    LOG_ERR("Could not add multicast address to interface %d", ret);
-    return false;
-  }
-  return true;
-}
-
-void join_group() {
-  struct sockaddr_in6 addr;
-  addr.sin6_addr.s6_addr[0] = 0xFF;
-  addr.sin6_addr.s6_addr[1] = 0x02;
-  addr.sin6_addr.s6_addr[15] = 0xFB;
-  join_multicast_group(&addr);
-}
-
-static inline int mdns_socket_setup_ipv6(int sock,
-                                         const struct sockaddr_in6 *saddr) {
-  unsigned int reuseaddr = 1;
-
-  zsock_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuseaddr,
-             sizeof(reuseaddr));
-  zsock_setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char *)&reuseaddr,
-             sizeof(reuseaddr));
-
-  join_group();
-
-  struct sockaddr_in6 sock_addr;
-  if (!saddr) {
-    memset(&sock_addr, 0, sizeof(struct sockaddr_in6));
-    sock_addr.sin6_family = AF_INET6;
-    sock_addr.sin6_addr = in6addr_any;
-  } else {
-    memcpy(&sock_addr, saddr, sizeof(struct sockaddr_in6));
-  }
-
-  if (zsock_bind(sock, (struct sockaddr *)&sock_addr,
-                 sizeof(struct sockaddr_in6)))
-    return -1;
-
-  const int flags = zsock_fcntl(sock, F_GETFL, 0);
-  zsock_fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-
-  return 0;
-}
-
-static inline void mdns_socket_close(int sock) { zsock_close(sock); }
-
-static inline int mdns_socket_open_ipv6(const struct sockaddr_in6 *saddr) {
-  int sock = (int)zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-  if (sock < 0)
-    return -1;
-  if (mdns_socket_setup_ipv6(sock, saddr)) {
-    mdns_socket_close(sock);
-    return -1;
-  }
-  return sock;
 }
 
 static inline int mdns_string_skip(const void *buffer, size_t size,
@@ -468,12 +397,89 @@ static inline size_t mdns_records_parse(int sock, const struct sockaddr *from,
   return parsed;
 }
 
+bool join_multicast_group(struct sockaddr_in6 *mcast_addr) {
+  int ret;
+	struct net_if_mcast_addr *mcast;
+  struct sockaddr_in6 *mcast_addr6 = mcast_addr;
+  struct net_if *iface;
+
+  iface = net_if_get_default();
+  if (!iface) {
+    LOG_ERR("Could not get the default interface\n");
+    return false;
+  }
+
+  mcast = net_if_ipv6_maddr_add(iface, &mcast_addr6->sin6_addr);
+  if (!mcast) {
+    LOG_ERR("Could not add multicast address to interface");
+    return false;
+  }
+
+	net_if_ipv6_maddr_join(iface, mcast);
+  return true;
+}
+
+void join_group() {
+  struct sockaddr_in6 addr;
+	memset(&addr, 0, sizeof(struct sockaddr_in6));
+  addr.sin6_addr.s6_addr[0] = 0xFF;
+  addr.sin6_addr.s6_addr[1] = 0x02;
+  addr.sin6_addr.s6_addr[15] = 0xFB;
+  join_multicast_group(&addr);
+}
+
+static inline int mdns_socket_setup_ipv6(int sock,
+                                         const struct sockaddr_in6 *saddr) {
+  unsigned int reuseaddr = 1;
+
+  join_group();
+
+  zsock_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuseaddr,
+                   sizeof(reuseaddr));
+  zsock_setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char *)&reuseaddr,
+                   sizeof(reuseaddr));
+
+  struct sockaddr_in6 sock_addr;
+  if (!saddr) {
+    memset(&sock_addr, 0, sizeof(struct sockaddr_in6));
+    sock_addr.sin6_family = AF_INET6;
+    sock_addr.sin6_addr = in6addr_any;
+    sock_addr.sin6_port = htons(MDNS_PORT);
+  } else {
+    memcpy(&sock_addr, saddr, sizeof(struct sockaddr_in6));
+  }
+
+  if (zsock_bind(sock, (struct sockaddr *)&sock_addr,
+                 sizeof(struct sockaddr_in6)))
+    return -1;
+
+
+  // const int flags = zsock_fcntl(sock, F_GETFL, 0);
+  // zsock_fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+  return 0;
+}
+
+static inline void mdns_socket_close(int sock) { zsock_close(sock); }
+
+static inline int mdns_socket_open_ipv6(const struct sockaddr_in6 *saddr) {
+  int sock = (int)zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+  if (sock < 0)
+    return -1;
+  if (mdns_socket_setup_ipv6(sock, saddr)) {
+    mdns_socket_close(sock);
+    return -1;
+  }
+  return sock;
+}
+
 static inline size_t mdns_query_recv(int sock, void *buffer, size_t capacity,
                                      int only_query_id) {
   struct sockaddr_in6 addr;
   struct sockaddr *saddr = (struct sockaddr *)&addr;
   socklen_t addrlen = sizeof(addr);
   memset(&addr, 0, sizeof(addr));
+
   int ret = zsock_recvfrom(sock, (char *)buffer, capacity, 0, saddr, &addrlen);
   if (ret <= 0) {
     LOG_ERR("Failed to recieve data %d", errno);
@@ -515,7 +521,7 @@ static inline size_t mdns_query_recv(int sock, void *buffer, size_t capacity,
   records = mdns_records_parse(sock, saddr, addrlen, buffer, data_size, &offset,
                                MDNS_ENTRYTYPE_ANSWER, query_id, answer_rrs);
   total_records += records;
-  if (records != answer_rrs) 
+  if (records != answer_rrs)
     return total_records;
 
   records =
@@ -544,7 +550,6 @@ void main(void) {
     return;
   }
 
-
   char query[] = "_greybus._tcp.local\0";
   char buffer[100];
   int ret;
@@ -557,12 +562,12 @@ void main(void) {
   LOG_DBG("Socket Created");
 
   while (1) {
-    mdns_query_send(sock, MDNS_RECORDTYPE_ANY, query, strlen(query), buffer,
+    mdns_query_send(sock, MDNS_RECORDTYPE_PTR, query, strlen(query), buffer,
                     sizeof(buffer), 0);
     LOG_DBG("Sent Request");
     ret = mdns_query_recv(sock, buffer, sizeof(buffer), 0);
     LOG_DBG("Got %d devices", ret);
     // net_ipv6_nbr_foreach(callback, NULL);
-    k_sleep(K_MSEC(5000));
+    k_sleep(K_MSEC(10000));
   }
 }
