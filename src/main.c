@@ -4,8 +4,10 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/posix/fcntl.h>
+#include <zephyr/sys/cbprintf.h>
 
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
+#define NI_MAXSERV 1
 
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 LOG_MODULE_REGISTER(cc1352_greybus, 4);
@@ -19,8 +21,8 @@ LOG_MODULE_REGISTER(cc1352_greybus, 4);
   ((const void *)((const char *)(p) + (ptrdiff_t)(ofs)))
 #define MDNS_POINTER_DIFF(a, b)                                                \
   ((size_t)((const char *)(a) - (const char *)(b)))
-
 #define MDNS_INVALID_POS ((size_t)-1)
+#define MDNS_STRING_FORMAT(s) (int)((s).length), s.str
 
 enum mdns_entry_type {
   MDNS_ENTRYTYPE_QUESTION = 0,
@@ -75,6 +77,11 @@ struct mdns_string_pair_t {
   size_t offset;
   size_t length;
   int ref;
+};
+
+struct mdns_string_t {
+  const char *str;
+  size_t length;
 };
 
 static inline uint32_t mdns_ntohl(const void *data) {
@@ -365,6 +372,86 @@ static inline int mdns_string_skip(const void *buffer, size_t size,
   return 1;
 }
 
+static struct mdns_string_t
+ipv6_address_to_string(char *buffer, size_t capacity,
+                       const struct sockaddr_in6 *addr, size_t addrlen) {
+  char host[NI_MAXHOST] = {0};
+  char service[NI_MAXSERV] = {0};
+  int ret = getnameinfo((const struct sockaddr *)addr, (socklen_t)addrlen, host,
+                        NI_MAXHOST, service, NI_MAXSERV,
+                        NI_NUMERICSERV | NI_NUMERICHOST);
+  int len = 0;
+  if (ret == 0) {
+    if (addr->sin6_port != 0)
+      len = snprintf(buffer, capacity, "[%s]:%s", host, service);
+    else
+      len = snprintf(buffer, capacity, "%s", host);
+  }
+  if (len >= (int)capacity)
+    len = (int)capacity - 1;
+  struct mdns_string_t str;
+  str.str = buffer;
+  str.length = len;
+  return str;
+}
+
+static struct mdns_string_t ip_address_to_string(char *buffer, size_t capacity,
+                                                 const struct sockaddr *addr,
+                                                 size_t addrlen) {
+  return ipv6_address_to_string(buffer, capacity,
+                                (const struct sockaddr_in6 *)addr, addrlen);
+}
+
+static inline struct mdns_string_t mdns_string_extract(const void *buffer, size_t size,
+                                                size_t *offset, char *str,
+                                                size_t capacity) {
+  size_t cur = *offset;
+  size_t end = MDNS_INVALID_POS;
+  struct mdns_string_pair_t substr;
+  struct mdns_string_t result;
+  result.str = str;
+  result.length = 0;
+  char *dst = str;
+  unsigned int counter = 0;
+  size_t remain = capacity;
+  do {
+    substr = mdns_get_next_substring(buffer, size, cur);
+    if ((substr.offset == MDNS_INVALID_POS) ||
+        (counter++ > MDNS_MAX_SUBSTRINGS))
+      return result;
+    if (substr.ref && (end == MDNS_INVALID_POS))
+      end = cur + 2;
+    if (substr.length) {
+      size_t to_copy = (substr.length < remain) ? substr.length : remain;
+      memcpy(dst, (const char *)buffer + substr.offset, to_copy);
+      dst += to_copy;
+      remain -= to_copy;
+      if (remain) {
+        *dst++ = '.';
+        --remain;
+      }
+    }
+    cur = substr.offset + substr.length;
+  } while (substr.length);
+
+  if (end == MDNS_INVALID_POS)
+    end = cur + 1;
+  *offset = end;
+
+  result.length = capacity - remain;
+  return result;
+}
+
+static inline struct mdns_string_t
+mdns_record_parse_ptr(const void *buffer, size_t size, size_t offset,
+                      size_t length, char *strbuffer, size_t capacity) {
+  // PTR record is just a string
+  if ((size >= offset + length) && (length >= 2))
+    return mdns_string_extract(buffer, size, &offset, strbuffer, capacity);
+  struct mdns_string_t empty = {0, 0};
+  return empty;
+}
+
 static inline size_t mdns_records_parse(int sock, const struct sockaddr *from,
                                         size_t addrlen, const void *buffer,
                                         size_t size, size_t *offset,
@@ -389,6 +476,28 @@ static inline size_t mdns_records_parse(int sock, const struct sockaddr *from,
     *offset += 10;
 
     if (length <= (size - (*offset))) {
+      char addrbuffer[64];
+			char namebuffer[256];
+			char entrybuffer[256];
+			size_t record_length = length;
+			size_t record_offset = *offset;
+			mdns_entry_type_t entry = type;
+      struct mdns_string_t fromaddrstr =
+          ip_address_to_string(addrbuffer, sizeof(addrbuffer), from, addrlen);
+      struct mdns_string_t namestr =
+          mdns_record_parse_ptr(data, size, record_offset, record_length,
+                                namebuffer, sizeof(namebuffer));
+      const char *entrytype =
+          (entry == MDNS_ENTRYTYPE_ANSWER)
+              ? "answer"
+              : ((entry == MDNS_ENTRYTYPE_AUTHORITY) ? "authority"
+                                                     : "additional");
+      struct mdns_string_t entrystr = mdns_string_extract(
+          data, size, &name_offset, entrybuffer, sizeof(entrybuffer));
+      LOG_DBG("%.*s : %s %.*s PTR %.*s rclass 0x%x ttl %u length %d\n",
+              MDNS_STRING_FORMAT(fromaddrstr), entrytype,
+              MDNS_STRING_FORMAT(entrystr), MDNS_STRING_FORMAT(namestr), rclass,
+              ttl, (int)record_length);
       ++parsed;
     }
 
@@ -398,8 +507,7 @@ static inline size_t mdns_records_parse(int sock, const struct sockaddr *from,
 }
 
 bool join_multicast_group(struct sockaddr_in6 *mcast_addr) {
-  int ret;
-	struct net_if_mcast_addr *mcast;
+  struct net_if_mcast_addr *mcast;
   struct sockaddr_in6 *mcast_addr6 = mcast_addr;
   struct net_if *iface;
 
@@ -415,13 +523,13 @@ bool join_multicast_group(struct sockaddr_in6 *mcast_addr) {
     return false;
   }
 
-	net_if_ipv6_maddr_join(iface, mcast);
+  net_if_ipv6_maddr_join(iface, mcast);
   return true;
 }
 
 void join_group() {
   struct sockaddr_in6 addr;
-	memset(&addr, 0, sizeof(struct sockaddr_in6));
+  memset(&addr, 0, sizeof(struct sockaddr_in6));
   addr.sin6_addr.s6_addr[0] = 0xFF;
   addr.sin6_addr.s6_addr[1] = 0x02;
   addr.sin6_addr.s6_addr[15] = 0xFB;
@@ -452,7 +560,6 @@ static inline int mdns_socket_setup_ipv6(int sock,
   if (zsock_bind(sock, (struct sockaddr *)&sock_addr,
                  sizeof(struct sockaddr_in6)))
     return -1;
-
 
   // const int flags = zsock_fcntl(sock, F_GETFL, 0);
   // zsock_fcntl(sock, F_SETFL, flags | O_NONBLOCK);
@@ -521,6 +628,7 @@ static inline size_t mdns_query_recv(int sock, void *buffer, size_t capacity,
   records = mdns_records_parse(sock, saddr, addrlen, buffer, data_size, &offset,
                                MDNS_ENTRYTYPE_ANSWER, query_id, answer_rrs);
   total_records += records;
+  LOG_DBG("Answer Records %d", records);
   if (records != answer_rrs)
     return total_records;
 
@@ -528,6 +636,7 @@ static inline size_t mdns_query_recv(int sock, void *buffer, size_t capacity,
       mdns_records_parse(sock, saddr, addrlen, buffer, data_size, &offset,
                          MDNS_ENTRYTYPE_AUTHORITY, query_id, authority_rrs);
   total_records += records;
+  LOG_DBG("Authority Records %d", records);
   if (records != authority_rrs)
     return total_records;
 
@@ -535,14 +644,11 @@ static inline size_t mdns_query_recv(int sock, void *buffer, size_t capacity,
       mdns_records_parse(sock, saddr, addrlen, buffer, data_size, &offset,
                          MDNS_ENTRYTYPE_ADDITIONAL, query_id, additional_rrs);
   total_records += records;
+  LOG_DBG("Additional Records %d", records);
   if (records != additional_rrs)
     return total_records;
 
   return total_records;
-}
-
-static void callback(struct net_nbr *nbr, void *user_data) {
-  LOG_DBG("Callback");
 }
 
 void main(void) {
