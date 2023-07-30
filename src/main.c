@@ -19,7 +19,7 @@ void main(void) {
   char query[] = "_greybus._tcp.local\0";
   int ret;
 
-  int sock = mdns_socket_open_ipv6(&mdns_addr);
+  int sock = mdns_socket_open_ipv6(&mdns_addr, 1000);
   if (sock < 0) {
     LOG_ERR("Failed to create socket");
     return;

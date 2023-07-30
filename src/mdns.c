@@ -151,8 +151,11 @@ mdns_get_next_substring(const void *rawdata, size_t size, size_t offset) {
 }
 
 static inline int mdns_socket_setup_ipv6(int sock,
-                                         const struct in6_addr *jaddr) {
+                                         const struct in6_addr *jaddr, int timeout_msec) {
   unsigned int reuseaddr = 1;
+	struct timeval tv;
+
+	tv.tv_usec = timeout_msec * 1000;
 
   if (!join_multicast_group(jaddr)) {
     LOG_ERR("Failed to join multicast group");
@@ -163,6 +166,7 @@ static inline int mdns_socket_setup_ipv6(int sock,
                    sizeof(reuseaddr));
   zsock_setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char *)&reuseaddr,
                    sizeof(reuseaddr));
+	zsock_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   struct sockaddr_in6 sock_addr;
   memset(&sock_addr, 0, sizeof(struct sockaddr_in6));
@@ -546,13 +550,14 @@ static inline size_t mdns_records_parse(int sock, const struct sockaddr *from,
 }
 
 size_t mdns_query_recv(int sock) {
+	int ret;
   struct sockaddr_in6 addr;
 	char buffer[100];
   struct sockaddr *saddr = (struct sockaddr *)&addr;
   socklen_t addrlen = sizeof(addr);
   memset(&addr, 0, sizeof(addr));
 
-  int ret = zsock_recvfrom(sock, buffer, sizeof(buffer), 0, saddr, &addrlen);
+  ret = zsock_recvfrom(sock, buffer, sizeof(buffer), 0, saddr, &addrlen);
   if (ret <= 0) {
     LOG_ERR("Failed to recieve data %d", errno);
     return 0;
@@ -611,7 +616,7 @@ size_t mdns_query_recv(int sock) {
   return total_records;
 }
 
-int mdns_socket_open_ipv6(const struct in6_addr *jaddr) {
+int mdns_socket_open_ipv6(const struct in6_addr *jaddr, int timeout_msec) {
   int sock = (int)zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
   if (sock < 0)
     return -1;
