@@ -549,7 +549,7 @@ static inline size_t mdns_records_parse(int sock, const struct sockaddr *from,
   return parsed;
 }
 
-size_t mdns_query_recv(int sock) {
+static size_t mdns_query_recv_internal(int sock) {
 	int ret;
   struct sockaddr_in6 addr;
 	char buffer[100];
@@ -559,7 +559,6 @@ size_t mdns_query_recv(int sock) {
 
   ret = zsock_recvfrom(sock, buffer, sizeof(buffer), 0, saddr, &addrlen);
   if (ret <= 0) {
-    LOG_ERR("Failed to recieve data %d", errno);
     return 0;
   }
 
@@ -575,8 +574,7 @@ size_t mdns_query_recv(int sock) {
   (void)sizeof(flags);
 
   // Skip questions part
-  int i;
-  for (i = 0; i < questions; ++i) {
+  for (int i = 0; i < questions; ++i) {
     size_t offset = MDNS_POINTER_DIFF(data, buffer);
     if (!mdns_string_skip(buffer, data_size, &offset))
       return 0;
@@ -616,11 +614,23 @@ size_t mdns_query_recv(int sock) {
   return total_records;
 }
 
+
+size_t mdns_query_recv(int sock) {
+	int ret, total = 0;
+
+	do {
+		ret = mdns_query_recv_internal(sock);
+		total += ret;
+	} while(ret);
+
+	return total;
+}
+
 int mdns_socket_open_ipv6(const struct in6_addr *jaddr, int timeout_msec) {
   int sock = (int)zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
   if (sock < 0)
     return -1;
-  if (mdns_socket_setup_ipv6(sock, jaddr)) {
+  if (mdns_socket_setup_ipv6(sock, jaddr, timeout_msec)) {
     mdns_socket_close(sock);
     return -1;
   }
