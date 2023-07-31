@@ -16,6 +16,7 @@ void main(void) {
     return;
   }
 
+	struct in6_addr nodes[5];
   char query[] = "_greybus._tcp.local\0";
   int ret;
 
@@ -29,7 +30,7 @@ void main(void) {
   while (1) {
     mdns_query_send(sock, query, strlen(query));
     LOG_DBG("Sent Request");
-    ret = mdns_query_recv(sock);
+    ret = mdns_query_recv(sock, nodes, 5);
     LOG_DBG("Got %d devices", ret);
     k_sleep(K_MSEC(10000));
   }
