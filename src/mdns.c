@@ -528,7 +528,7 @@ static inline size_t mdns_records_parse(int sock, const struct sockaddr *from,
       struct mdns_string_t fromaddrstr =
           ip_address_to_string(addrbuffer, sizeof(addrbuffer), from, addrlen);
       struct mdns_string_t namestr =
-          mdns_record_parse_ptr(data, size, record_offset, record_length,
+          mdns_record_parse_ptr(buffer, size, record_offset, record_length,
                                 namebuffer, sizeof(namebuffer));
       const char *entrytype =
           (entry == MDNS_ENTRYTYPE_ANSWER)
@@ -536,7 +536,7 @@ static inline size_t mdns_records_parse(int sock, const struct sockaddr *from,
               : ((entry == MDNS_ENTRYTYPE_AUTHORITY) ? "authority"
                                                      : "additional");
       struct mdns_string_t entrystr = mdns_string_extract(
-          data, size, &name_offset, entrybuffer, sizeof(entrybuffer));
+          buffer, size, &name_offset, entrybuffer, sizeof(entrybuffer));
       LOG_DBG("%.*s : %s %.*s PTR %.*s rclass 0x%x ttl %u length %d\n",
               MDNS_STRING_FORMAT(fromaddrstr), entrytype,
               MDNS_STRING_FORMAT(entrystr), MDNS_STRING_FORMAT(namestr), rclass,
