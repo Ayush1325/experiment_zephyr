@@ -39,7 +39,7 @@ void main(void) {
   while (1) {
     mdns_query_send(sock, query, strlen(query));
     LOG_DBG("Sent Request");
-    ret = mdns_query_recv(sock, nodes, 5);
+    ret = mdns_query_recv(sock, nodes, 5, query, strlen(query));
     LOG_DBG("Got %d devices", ret);
 
     if (ret > 0) {

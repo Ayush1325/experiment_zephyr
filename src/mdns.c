@@ -8,6 +8,7 @@ LOG_MODULE_DECLARE(cc1352_greybus, 4);
 #define MDNS_UNICAST_RESPONSE 0x8000U
 #define MDNS_MAX_SUBSTRINGS 64
 #define MDNS_RESPONSE_BUFFER_SIZE 100
+#define MDNS_REQUEST_BUFFER_SIZE 100
 #define MDNS_PTR_NAME_SIZE 100
 
 #define MDNS_POINTER_OFFSET(p, ofs) ((void *)((char *)(p) + (ptrdiff_t)(ofs)))
@@ -472,13 +473,14 @@ mdns_record_parse_ptr(const void *buffer, size_t size, size_t offset,
 }
 
 static bool mdns_answer_check(const void *buffer, size_t size, size_t *offset,
-                              size_t records) {
-  int ret;
+                              size_t records, const char *query,
+                              size_t query_len) {
   struct mdns_string_t namestr;
   size_t parsed = 0, i, record_length, record_offset;
   uint16_t length;
   char namebuffer[MDNS_PTR_NAME_SIZE];
-  char expected[] = "zephyr._greybus._tcp.local\0";
+  // char expected[] = "zephyr._greybus._tcp.local\0";
+  char expected[] = "zephyr.\0";
 
   for (i = 0; i < records; ++i) {
     mdns_string_skip(buffer, size, offset);
@@ -502,8 +504,8 @@ static bool mdns_answer_check(const void *buffer, size_t size, size_t *offset,
           mdns_record_parse_ptr(buffer, size, record_offset, record_length,
                                 namebuffer, sizeof(namebuffer));
 
-      ret = memcmp(expected, namestr.str, strlen(expected));
-      if (ret == 0) {
+      if ((memcmp(expected, namestr.str, strlen(expected)) == 0) &&
+          (memcmp(query, namestr.str + strlen(expected), query_len) == 0)) {
         return true;
       }
       ++parsed;
@@ -514,7 +516,8 @@ static bool mdns_answer_check(const void *buffer, size_t size, size_t *offset,
   return false;
 }
 
-static size_t mdns_query_recv_internal(int sock, struct in6_addr *addrptr) {
+static size_t mdns_query_recv_internal(int sock, struct in6_addr *addrptr,
+                                       const char *query, size_t query_len) {
   int ret;
   size_t data_size, offset;
   uint16_t flags, questions, answer_rrs;
@@ -522,6 +525,7 @@ static size_t mdns_query_recv_internal(int sock, struct in6_addr *addrptr) {
   char buffer[MDNS_RESPONSE_BUFFER_SIZE];
   struct sockaddr *saddr = (struct sockaddr *)&addr;
   socklen_t addrlen = sizeof(addr);
+  const uint16_t *data = (const uint16_t *)buffer;
 
   memset(&addr, 0, sizeof(addr));
 
@@ -531,7 +535,6 @@ static size_t mdns_query_recv_internal(int sock, struct in6_addr *addrptr) {
   }
 
   data_size = (size_t)ret;
-  const uint16_t *data = (const uint16_t *)buffer;
 
   // uint16_t query_id = mdns_ntohs(data++);
   data++;
@@ -557,7 +560,8 @@ static size_t mdns_query_recv_internal(int sock, struct in6_addr *addrptr) {
   }
 
   offset = MDNS_POINTER_DIFF(data, buffer);
-  if (mdns_answer_check(buffer, data_size, &offset, answer_rrs)) {
+  if (mdns_answer_check(buffer, data_size, &offset, answer_rrs, query,
+                        query_len)) {
     net_ipaddr_copy(addrptr, &addr.sin6_addr);
     return 1;
   }
@@ -567,11 +571,12 @@ early_exit:
 }
 
 size_t mdns_query_recv(int sock, struct in6_addr *addr_list,
-                       size_t addr_list_len) {
-  int ret, total = 0;
+                       size_t addr_list_len, const char *query,
+                       size_t query_len) {
+  size_t ret, total = 0;
 
   do {
-    ret = mdns_query_recv_internal(sock, &addr_list[total]);
+    ret = mdns_query_recv_internal(sock, &addr_list[total], query, query_len);
     total += ret;
   } while (ret && total < addr_list_len);
 
@@ -591,7 +596,7 @@ int mdns_socket_open_ipv6(const struct in6_addr *jaddr, int timeout_msec) {
 
 int mdns_query_send(int sock, const char *name, size_t length) {
   struct mdns_query_t query;
-  char buffer[100];
+  char buffer[MDNS_REQUEST_BUFFER_SIZE];
 
   query.type = MDNS_RECORDTYPE_PTR;
   query.name = name;
